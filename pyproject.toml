@@ -1,0 +1,15 @@
+[project]
+name = "hermes-trading"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "ccxt",
+    "yfinance",
+    "pyyaml",
+    "httpx",
+    "mcp>=1.27.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
