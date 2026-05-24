@@ -5,7 +5,9 @@ WORKDIR /app
 RUN pip install uv
 
 COPY pyproject.toml .
-RUN uv pip install --system -e .
+COPY hermes_trading/ hermes_trading/
+
+RUN uv pip install --system ccxt yfinance pyyaml httpx
 
 COPY . .
 
