@@ -25,8 +25,8 @@ MODE = os.getenv("HERMES_TRADING_MODE", "paper")
 ACCEPT_RISK = os.getenv("HERMES_TRADING_I_ACCEPT_RISK", "false").lower() == "true"
 
 EXCHANGE_ID = os.getenv("EXCHANGE", "binance").lower().strip()
-# Hyperliquid perps use "BTC/USDC:USDC" in ccxt
-ASSET = "BTC/USDC:USDC" if EXCHANGE_ID == "hyperliquid" else "BTC/USDT"
+# Hyperliquid spot: BTC/USDC
+ASSET = "BTC/USDC" if EXCHANGE_ID == "hyperliquid" else "BTC/USDT"
 
 
 def get_exchange():

@@ -1,4 +1,4 @@
-asset: "BTC/USDC:USDC"
+asset: "BTC/USDC"
 target_return_30d: 0.47     # success
 max_drawdown:       0.05    # failure
 min_sharpe:         1.0     # quality bar
