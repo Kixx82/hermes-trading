@@ -117,6 +117,7 @@ def set_paused(val: bool):
 
 
 def add_log(level: str, msg: str):
+    global _last_logs
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "level": level,
@@ -134,9 +135,9 @@ def get_logs(limit: int = 100) -> list[dict]:
 
 
 def add_price_point(ts: str, price: float, fast: float, slow: float):
+    global _price_history
     with _lock:
         _price_history.append({"ts": ts, "price": price, "fast": fast, "slow": slow})
-        # keep last 500 points
         if len(_price_history) > 500:
             _price_history = _price_history[-500:]
 
