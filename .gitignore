@@ -3,4 +3,5 @@
 __pycache__/
 *.pyc
 state/history/
+state/trades.json
 *.tar.gz

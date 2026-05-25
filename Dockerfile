@@ -2,13 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install uv
+RUN pip install uv --quiet
 
 COPY pyproject.toml .
 COPY hermes_trading/ hermes_trading/
+COPY main.py .
 
-RUN uv pip install --system ccxt yfinance pyyaml httpx
+RUN uv pip install --system ccxt yfinance pyyaml httpx fastapi uvicorn --quiet
 
-COPY . .
+EXPOSE 8000
 
-CMD ["python", "-m", "hermes_trading.worker"]
+CMD ["python", "main.py"]
