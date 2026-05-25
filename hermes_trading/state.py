@@ -21,6 +21,9 @@ _current_position: Optional[dict] = None
 _trade_count = 0
 _last_logs: list[dict] = []  # keep last 1000 log entries
 _price_history: list[dict] = []  # {ts, price, fast, slow} for charts
+_equity_curve: list[dict] = []  # {ts, equity} for portfolio chart
+_funding_rate: float = 0.0
+_backtest_result: Optional[dict] = None
 
 # --- Config ---
 DEFAULT_CONFIG = {
@@ -30,6 +33,10 @@ DEFAULT_CONFIG = {
     "indicator": "ema_cross",
     "fast_period": 9,
     "slow_period": 21,
+    "rsi_period": 14,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "use_rsi_filter": False,
     "position_size_pct": 0.10,
     "stop_loss_pct": 0.03,
     "take_profit_pct": 0.06,
@@ -142,6 +149,41 @@ def add_price_point(ts: str, price: float, fast: float, slow: float):
             _price_history = _price_history[-500:]
 
 
+def add_equity_point(ts: str, equity: float):
+    global _equity_curve
+    with _lock:
+        _equity_curve.append({"ts": ts, "equity": equity})
+        if len(_equity_curve) > 1000:
+            _equity_curve = _equity_curve[-1000:]
+
+
+def get_equity_curve(limit: int = 500) -> list[dict]:
+    with _lock:
+        return list(_equity_curve[-limit:])
+
+
+def set_funding_rate(rate: float):
+    global _funding_rate
+    with _lock:
+        _funding_rate = rate
+
+
+def get_funding_rate() -> float:
+    with _lock:
+        return _funding_rate
+
+
+def set_backtest_result(result: Optional[dict]):
+    global _backtest_result
+    with _lock:
+        _backtest_result = result
+
+
+def get_backtest_result() -> Optional[dict]:
+    with _lock:
+        return _backtest_result
+
+
 def get_price_history(limit: int = 200) -> list[dict]:
     with _lock:
         return list(_price_history[-limit:])
@@ -157,6 +199,7 @@ def get_status() -> dict:
             "config": dict(_current_config),
             "position": pos,
             "trade_count": _trade_count,
+            "funding_rate": _funding_rate,
         }
 
 

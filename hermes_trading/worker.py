@@ -1,5 +1,5 @@
 """
-worker.py — main loop. Fetches candles, applies strategy, fires paper trades.
+worker.py — main loop. Multi-indicator strategy with RSI filter, SL/TP, funding rate.
 Runs as background thread controlled via state module.
 """
 import os
@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ccxt
-import yaml
 
 from hermes_trading import strategy as strat
 from hermes_trading import state
@@ -23,10 +22,10 @@ HISTORY_DIR = STATE_DIR / "history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 MODE = os.getenv("HERMES_TRADING_MODE", "paper")
+_INITIAL_EQUITY = 10000.0  # paper starting capital
 
 
 def _setup_exchange() -> ccxt.Exchange:
-    """Create exchange instance. In paper mode, no auth needed."""
     cls = getattr(ccxt, state.get_config()["exchange"])
     if MODE == "live" and state.is_running():
         api_key = os.getenv("EXCHANGE_API_KEY", "")
@@ -37,23 +36,15 @@ def _setup_exchange() -> ccxt.Exchange:
     return cls()
 
 
-def _ema(prices: list[float], period: int) -> float:
-    k = 2 / (period + 1)
-    val = prices[0]
-    for p in prices[1:]:
-        val = p * k + val * (1 - k)
-    return val
-
-
-def _record_trade(action, price, size, params, goal, pnl=None):
+def _record_trade(action, price, size, params, pnl=None, exit_reason=None):
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "action": action,
         "price": price,
         "size": size,
         "pnl": pnl,
+        "exit_reason": exit_reason,
         "strategy_snapshot": params,
-        "goal_snapshot": goal,
     }
     fname = HISTORY_DIR / f"{record['ts'].replace(':', '-')}.json"
     with open(fname, "w") as f:
@@ -61,7 +52,6 @@ def _record_trade(action, price, size, params, goal, pnl=None):
 
 
 def run_loop():
-    """Main trading loop — runs in a background thread."""
     logger.info("Worker loop started — mode=%s", MODE)
     state.set_running(True)
     state.set_paused(False)
@@ -70,63 +60,96 @@ def run_loop():
     try:
         exchange = _setup_exchange()
         params = strat.load()
-        goal = strat.load_goal()
         logger.info("Strategy: %s", params)
-        logger.info("Goal: %s", goal)
 
         while state.is_running():
             try:
-                # Reload config every cycle (hot-reload)
                 cfg = state.get_config()
                 symbol = cfg["symbol"]
-                fast_p = cfg["fast_period"]
-                slow_p = cfg["slow_period"]
                 size_pct = cfg["position_size_pct"]
-                period_max = max(fast_p, slow_p)
 
-                # Check if paused
                 if state.is_paused():
                     time.sleep(5)
                     continue
 
-                # Fetch candles
-                ohlcv = exchange.fetch_ohlcv(symbol, cfg["timeframe"], limit=period_max + 5)
+                # Fetch candles (need enough for RSI + longest MA)
+                needed = max(cfg["slow_period"], cfg.get("rsi_period", 14)) + 10
+                ohlcv = exchange.fetch_ohlcv(symbol, cfg["timeframe"], limit=needed)
                 closes = [c[4] for c in ohlcv]
-                fast = _ema(closes, fast_p)
-                slow = _ema(closes, slow_p)
                 price = closes[-1]
                 ts = datetime.now(timezone.utc).isoformat()
 
-                # Store for dashboard
+                # Calculate indicators
+                fast = strat.ema(closes, cfg["fast_period"])
+                slow = strat.ema(closes, cfg["slow_period"])
+                current_rsi = strat.rsi(closes, cfg.get("rsi_period", 14))
                 state.add_price_point(ts, price, fast, slow)
 
-                # Generate signal
+                # --- Funding rate check (Hyperliquid specific) ---
+                try:
+                    if cfg["exchange"] == "hyperliquid":
+                        ticker = exchange.fetch_funding_rate(symbol)
+                        if ticker and "fundingRate" in ticker:
+                            state.set_funding_rate(ticker["fundingRate"] * 100)
+                except Exception:
+                    pass  # non-fatal if funding rate unavailable
+
                 position = state.get_position()
-                signal = None
-                if fast > slow and position is None:
-                    signal = "buy"
-                elif fast < slow and position is not None:
-                    signal = "sell"
+
+                # --- SL/TP check first ---
+                if position:
+                    pnl_pct = (price - position["entry"]) / position["entry"]
+                    sl = cfg.get("stop_loss_pct", 0.03)
+                    tp = cfg.get("take_profit_pct", 0.06)
+
+                    if pnl_pct <= -sl:
+                        _record_trade("close", price, position["size"], params, pnl=pnl_pct, exit_reason="stop_loss")
+                        msg = f"STOP LOSS @ {price:.2f}  pnl={pnl_pct*100:.2f}%"
+                        logger.info(msg)
+                        state.add_log("SELL", msg)
+                        state.set_position(None)
+                        state.increment_trade_count()
+                        state.add_equity_point(ts, _INITIAL_EQUITY * (1 + pnl_pct))
+                        time.sleep(60)
+                        continue
+
+                    if pnl_pct >= tp:
+                        _record_trade("close", price, position["size"], params, pnl=pnl_pct, exit_reason="take_profit")
+                        msg = f"TAKE PROFIT @ {price:.2f}  pnl={pnl_pct*100:.2f}%"
+                        logger.info(msg)
+                        state.add_log("SELL", msg)
+                        state.set_position(None)
+                        state.increment_trade_count()
+                        state.add_equity_point(ts, _INITIAL_EQUITY * (1 + pnl_pct))
+                        time.sleep(60)
+                        continue
+
+                # --- Generate signal ---
+                signal = strat.generate_signal(closes, cfg, position)
 
                 if signal == "buy":
-                    size = size_pct
-                    state.set_position({"side": "long", "entry": price, "size": size})
-                    _record_trade("open", price, size, params, goal)
-                    msg = f"PAPER BUY @ {price:.2f}  size={size*100:.1f}%"
+                    position = {"side": "long", "entry": price, "size": size_pct}
+                    state.set_position(position)
+                    _record_trade("open", price, size_pct, params)
+                    rsi_info = f" rsi={current_rsi:.1f}" if cfg.get("use_rsi_filter") else ""
+                    msg = f"PAPER BUY @ {price:.2f}  size={size_pct*100:.1f}%{rsi_info}"
                     logger.info(msg)
                     state.add_log("BUY", msg)
+                    state.add_equity_point(ts, _INITIAL_EQUITY)
 
                 elif signal == "sell" and position:
                     pnl = (price - position["entry"]) / position["entry"]
-                    _record_trade("close", price, position["size"], params, goal, pnl=pnl)
+                    _record_trade("close", price, position["size"], params, pnl=pnl)
                     msg = f"PAPER SELL @ {price:.2f}  pnl={pnl*100:.2f}%"
                     logger.info(msg)
                     state.add_log("SELL", msg)
                     state.set_position(None)
                     state.increment_trade_count()
+                    state.add_equity_point(ts, _INITIAL_EQUITY * (1 + pnl))
 
                 else:
-                    state.add_log("INFO", f"price={price:.2f} fast={fast:.4f} slow={slow:.4f} — holding")
+                    rsi_info = f" rsi={current_rsi:.1f}" if cfg.get("use_rsi_filter") else ""
+                    state.add_log("INFO", f"price={price:.2f} fast={fast:.4f} slow={slow:.4f}{rsi_info} — holding")
 
             except Exception as e:
                 logger.error("Loop error: %s", e)
